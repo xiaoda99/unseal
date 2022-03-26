@@ -241,29 +241,44 @@ def gpt_attn_wrapper(
         if batch_size is None:
             batch_size = attn_output.shape[0]
         with torch.no_grad():
-            temp = attn_weights[...,None] * value[:,:,None]
+            temp = attn_weights[...,None] * value[:,:,None] # XD: bnij1,bn1jd->bnijd
             if len(c_proj.shape) == 2:
                 c_proj = einops.rearrange(c_proj, '(head_dim num_heads) out_dim -> head_dim num_heads out_dim', num_heads=attn_output.shape[1])
-            c_proj = einops.rearrange(c_proj, 'h n o -> n h o')
-            temp = temp[0,:,:-1] # could this be done earlier?
+            c_proj = einops.rearrange(c_proj, 'h n o -> n h o') # XD: nde
+            temp = temp[0,:,:-1] # could this be done earlier? # XD: bnijd->nijd
             new_temp = []
             for head in tqdm(range(temp.shape[0])):
                 new_temp.append([])
                 for i in range(math.ceil(temp.shape[1] / batch_size)):
-                    out = temp[head, i*batch_size:(i+1)*batch_size] @ c_proj[head]
-                    out = out @ vocab_embedding # compute logits
+                    out = temp[head, i*batch_size:(i+1)*batch_size] @ c_proj[head] # XD: 1jd,de->1je
+                    out = out @ vocab_embedding # compute logits #XD: 1je,ev->1jv
                     new_temp[-1].append(out)
             
                 # center logits
-                new_temp[-1] = torch.cat(new_temp[-1])
+                new_temp[-1] = torch.cat(new_temp[-1]) # XD: i1jv->ijv
                 new_temp[-1] -= torch.mean(new_temp[-1], dim=-1, keepdim=True)
                 # select targets
-                new_temp[-1] = new_temp[-1][...,torch.arange(len(target_ids)), target_ids]#.to('cpu')
+                new_temp[-1] = new_temp[-1][...,torch.arange(len(target_ids)), target_ids]#.to('cpu') # XD: ij
 
-            new_temp = torch.cat(new_temp, dim=0)
+            new_temp = torch.cat(new_temp, dim=0) # XD: (n i) j
             new_temp = einops.rearrange(new_temp, '(h t1) t2 -> h t1 t2', h=temp.shape[0], t1=len(target_ids), t2=len(target_ids))
             max_pos_value = torch.amax(new_temp).item()
             max_neg_value = torch.amax(-new_temp).item()
+
+            # XD
+            # inputs: 
+            #   attn_weights: bnij
+            #   value: bnjd
+            #   c_proj: nde
+            #   vocab_embedding: ev
+            #   target_ids: j
+            # output:
+            #   new_temp: nij 
+            'bnij,bnjd->bnijd'
+            'bnijd->nijd'  # b==1
+            'nijd,nde->nije'
+            'nije,ev->nijv'
+            'nijv->nij'
             
             save_ctx['logits'] = {
                 'pos': (new_temp/max_pos_value).clamp(min=0, max=1).detach().cpu(),
